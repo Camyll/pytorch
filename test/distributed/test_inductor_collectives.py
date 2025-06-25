@@ -937,6 +937,25 @@ class TestCollectivesInductor(DynamoDistributedSingleProcTestCase):
         self.assertEqual(counter.op_count, 2)
         self.assertTrue(same(out, correct))
 
+    def test_compiled_autograd_allreduce(self):
+        def func(inp):
+            ar = _functional_collectives.all_reduce(inp, "sum", "0")
+            return ar
+    
+        inputs = torch.ones(4, 4, device="cuda", requires_grad=True)
+        counter = CompileCounter()
+        compiled = torch.compile(func, backend=counter)
+        compiled_out = compiled(inputs)
+        eager_out = func(inputs)
+        eager_out.sum().backward()
+        with torch._dynamo.compiled_autograd._enable(torch.compile):
+            compiled_out.sum().backward()
+            compiled_grad = inputs.grad
+        eager_out.sum().backward()
+        eager_grad = inputs.grad
+        self.assertEqual(counter.frame_count, 1)
+        self.assertTrue(same(compiled_grad, eager_grad))
+
     def test_dynamo_trace_all_gather_tensor(self):
         def func(inp):
             ar = _functional_collectives.all_gather_tensor(inp, 0, "0")
