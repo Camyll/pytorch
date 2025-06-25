@@ -154,10 +154,13 @@ static Tensor sumproduct_pair(const Tensor& left_, const Tensor& right_, IntArra
   Tensor left = left_;
   Tensor right = right_;
   for (const auto i : c10::irange(dim)) {
-    auto sl = TORCH_GUARD_SIZE_OBLIVIOUS(left.sym_size(i).sym_ne(1));
-    auto sr = TORCH_GUARD_SIZE_OBLIVIOUS(right.sym_size(i).sym_ne(1));
+    auto l_r_equal = TORCH_GUARD_OR_FALSE(left.sym_size(i).sym_eq(right.sym_size(i)));
+    auto sl = TORCH_GUARD_OR_TRUE(left.sym_size(i).sym_ne(1));
+    auto sr = TORCH_GUARD_OR_TRUE(right.sym_size(i).sym_ne(1));
     if (sum_dims[i]) { // first dimensions that will be summed over after multiplication
-      if (sl && sr) {  // dimensions nontrivially in both left and right must be of the same size
+      if (sl && sr || l_r_equal) {  // dimensions nontrivially in both left and right must be of the same size
+        // if both left and right are equal, or we can't tell that its a broadcast for sure,
+        // we assume non-broadcast.
         TORCH_SYM_CHECK(left.sym_size(i).sym_eq(right.sym_size(i)), "non-broadcast dimensions must match");
         sum_size *= left.sym_size(i);
       } else if (sl) { // if it is only in one of left and right, we can sum right away
@@ -165,7 +168,9 @@ static Tensor sumproduct_pair(const Tensor& left_, const Tensor& right_, IntArra
       } else if (sr) {
         right = right.sum(i, true);
       }
-    } else if (sl && sr) { // now deal with dimensions that will be in the output
+    } else if (sl && sr || l_r_equal) { // now deal with dimensions that will be in the output
+      // if both left and right are equal, or we can't tell that its a broadcast for sure,
+      // we assume non-broadcast.
       // dimensions nontrivially in both left and right must be of the same size
       TORCH_SYM_CHECK(left.sym_size(i).sym_eq(right.sym_size(i)), "non-broadcast dimensions must match");
       lro.push_back(i);
@@ -477,7 +482,7 @@ Tensor einsum(std::string_view equation, TensorList operands, at::OptionalIntArr
         // Iterate over each dimension covered by ellipsis
         const auto ndim = operands[i].ndimension() - (static_cast<int64_t>(op_labels[i].size()) - 1);
         for (auto j = ell_num_dim - ndim; j < ell_num_dim; ++j) {
-          if (TORCH_GUARD_SIZE_OBLIVIOUS(op.sym_size(dim).sym_ne(1))) {
+          if (TORCH_GUARD_OR_TRUE(op.sym_size(dim).sym_ne(1))) {
             // Update ellipsis size
             TORCH_SYM_CHECK(
                 ell_sizes[j].sym_eq(1).sym_or(ell_sizes[j].sym_eq(op.sym_size(dim))),
@@ -496,7 +501,7 @@ Tensor einsum(std::string_view equation, TensorList operands, at::OptionalIntArr
           permutation[ell_index + j] = dim++;
         }
       } else if (permutation[label_perm_index[s]] == -1) {
-        if (TORCH_GUARD_SIZE_OBLIVIOUS(op.sym_size(dim).sym_ne(1))) {
+        if (TORCH_GUARD_OR_TRUE(op.sym_size(dim).sym_ne(1))) {
           // Update subscript
           TORCH_SYM_CHECK(
               label_size[s].sym_eq(1).sym_or(label_size[s].sym_eq(op.sym_size(dim))),
@@ -574,17 +579,23 @@ Tensor einsum(std::string_view equation, TensorList operands, at::OptionalIntArr
     SmallVector<int64_t, 5> a_dims_to_sum;
     SmallVector<int64_t, 5> b_dims_to_sum;
     for (auto dim = out_num_dim; dim < perm_index; ++dim) {
-      if (TORCH_GUARD_SIZE_OBLIVIOUS(a.sym_size(dim).sym_ne(1))
-        && TORCH_GUARD_SIZE_OBLIVIOUS(b.sym_size(dim).sym_ne(1))) {
+      auto a_b_equal = TORCH_GUARD_OR_FALSE(a.sym_size(dim).sym_eq(b.sym_size(dim)));
+      auto sa = TORCH_GUARD_OR_TRUE(a.sym_size(dim).sym_ne(1));
+      auto sb = TORCH_GUARD_OR_TRUE(b.sym_size(dim).sym_ne(1));
+
+      if (sa && sb || a_b_equal) {
+        // if both a and b are equal, or we can't tell that its a broadcast for sure,
+        // we assume non-broadcast.
+        TORCH_SYM_CHECK(a.sym_size(dim).sym_eq(b.sym_size(dim)), "non-broadcast dimensions must match");
         if (--dim_counts[dim] == 1) {
           sum_dims.push_back(dim);
           dim_counts[dim] = 0;
         }
       } else if (dim_counts[dim] == 1) {
-        if (TORCH_GUARD_SIZE_OBLIVIOUS(a.sym_size(dim).sym_ne(1))) {
+        if (sa) {
           a_dims_to_sum.push_back(dim);
           dim_counts[dim] = 0;
-        } else if (TORCH_GUARD_SIZE_OBLIVIOUS(b.sym_size(dim).sym_ne(1))) {
+        } else if (sb) {
           b_dims_to_sum.push_back(dim);
           dim_counts[dim] = 0;
         }
